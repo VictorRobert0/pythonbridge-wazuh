@@ -1,0 +1,48 @@
+# Manifesto do app do Slack para o SOC bridge.
+#
+# Como usar:
+#   1. https://api.slack.com/apps  ->  Create New App  ->  From an app manifest
+#   2. Escolha o workspace, cole este YAML
+#   3. Create  ->  Install to Workspace
+#   4. Basic Information -> App-Level Tokens -> Generate Token and Scopes
+#        nome: socket, escopo: connections:write   -> gera o token xapp-...
+#   5. OAuth & Permissions -> copie o Bot User OAuth Token (xoxb-...)
+#   6. Convide o bot no canal:  /invite @SOC Bridge
+
+display_information:
+  name: SOC Bridge
+  description: Alertas do Wazuh com acoes que refletem no DFIR-IRIS
+  background_color: "#1a1d21"
+  long_description: |
+    Publica alertas do Wazuh no Slack com templates especificos por decoder.
+    Os botoes Assumir e Fechar atualizam o alerta correspondente no DFIR-IRIS,
+    atribuindo a acao ao usuario que clicou. Respostas na thread do alerta
+    viram comentarios no alerta do IRIS.
+
+features:
+  bot_user:
+    display_name: SOC Bridge
+    always_online: true
+
+oauth_config:
+  scopes:
+    bot:
+      - chat:write          # postar e editar os alertas
+      - chat:write.public    # postar em canal publico sem convite
+      - channels:history     # ler respostas em thread (canal publico)
+      - groups:history       # ler respostas em thread (canal privado)
+      - files:read           # baixar imagens/evidencias enviadas na thread
+      - reactions:write      # marcar comentarios sincronizados
+      - users:read           # resolver nome do usuario
+      - users:read.email     # casar usuario do Slack com usuario do IRIS
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  token_rotation_enabled: false

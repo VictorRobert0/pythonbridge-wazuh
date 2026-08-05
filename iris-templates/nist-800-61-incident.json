@@ -1,0 +1,155 @@
+{
+    "name": "nist-800-61-ir",
+    "display_name": "Resposta a Incidentes (NIST SP 800-61r2)",
+    "description": "Template de resposta a incidentes de seguranca alinhado ao ciclo de vida do NIST SP 800-61r2: Preparacao; Deteccao e Analise; Contencao, Erradicacao e Recuperacao; e Atividade Pos-Incidente. Inclui tarefas acionaveis por fase e diretorios de notas para documentacao do caso.",
+    "author": "Victor Roberto",
+    "classification": "other:other",
+    "title_prefix": "[IR]",
+    "summary": "# Resposta a Incidentes — NIST SP 800-61r2\n\n> Incidente de seguranca em tratamento. Preencher os campos abaixo ao longo da investigacao.\n\n---\n\n## Ficha do Incidente\n\n| Campo | Valor |\n|---|---|\n| **ID / Titulo** | _preencher_ |\n| **Detectado em (UTC)** | _preencher_ |\n| **Fonte da deteccao** | Wazuh / SIEM / _preencher_ |\n| **Categoria** | Malware / Acesso nao autorizado / Exfiltracao / Phishing / DoS / Uso indevido |\n| **Severidade** | Baixa / Media / Alta / Critica |\n| **Status** | Em andamento |\n| **Incident lead** | _preencher_ |\n\n## Resumo Executivo\n\n_Descreva em 3-5 linhas o que aconteceu, como foi detectado e a situacao atual._\n\n## Impacto\n\n- **Ativos afetados:** _preencher_\n- **Dados afetados:** _preencher_\n- **Impacto operacional:** _preencher_\n- **Vetor de acesso inicial:** _preencher_\n\n## Progresso por Fase (NIST 800-61r2)\n\n- [ ] **1. Preparacao / Triagem** — incidente confirmado, severidade definida, time acionado\n- [ ] **2. Deteccao e Analise** — evidencias coletadas, escopo e IOCs mapeados\n- [ ] **3. Contencao, Erradicacao e Recuperacao** — ameaca contida, erradicada e operacao restaurada\n- [ ] **4. Pos-Incidente** — notificacoes, licoes aprendidas, deteccoes atualizadas\n\n---\n\n_Detalhes completos nas tarefas e nos diretorios de notas do caso (Linha do Tempo, Escopo e Ativos, IOCs e MITRE, Evidencias, Acoes de Resposta, Comunicacao, Licoes Aprendidas)._",
+    "tags": [
+        "incident-response",
+        "nist-800-61",
+        "soc"
+    ],
+    "tasks": [
+        {
+            "title": "1.1 Confirmar o incidente e abrir o caso",
+            "description": "Validar se o evento e um incidente real (nao falso positivo). Registrar data/hora de deteccao, fonte do alerta (Wazuh/SIEM), e o analista responsavel. Definir severidade inicial.",
+            "tags": ["deteccao", "triagem"]
+        },
+        {
+            "title": "1.2 Classificar severidade e categoria",
+            "description": "Classificar o incidente por categoria (malware, acesso nao autorizado, exfiltracao, negacao de servico, uso indevido, phishing) e severidade (baixa/media/alta/critica) com base em impacto e urgencia. Definir prioridade de atendimento.",
+            "tags": ["deteccao", "classificacao"]
+        },
+        {
+            "title": "1.3 Acionar o time e definir papeis",
+            "description": "Notificar o time de resposta e stakeholders conforme a severidade. Definir o incident lead, o escriba (documentacao) e os pontos de contato tecnicos. Registrar quem foi acionado e quando.",
+            "tags": ["preparacao", "comunicacao"]
+        },
+        {
+            "title": "2.1 Coletar e preservar evidencias",
+            "description": "Coletar logs, imagens de memoria/disco, artefatos de rede e capturas de tela. Preservar a cadeia de custodia (quem coletou, quando, hash dos arquivos). Anexar evidencias ao caso no diretorio de notas 'Evidencias'.",
+            "tags": ["analise", "forense"]
+        },
+        {
+            "title": "2.2 Determinar o escopo e o vetor inicial",
+            "description": "Identificar hosts, contas e dados afetados. Determinar o vetor de acesso inicial (phishing, credencial vazada, exploracao, movimento lateral) e a linha do tempo do ataque. Atualizar o diretorio 'Escopo e Ativos'.",
+            "tags": ["analise", "escopo"]
+        },
+        {
+            "title": "2.3 Levantar IOCs e mapear no MITRE ATT&CK",
+            "description": "Extrair indicadores de comprometimento (IPs, hashes, dominios, contas) e registra-los como IOCs no caso. Mapear as tecnicas observadas no MITRE ATT&CK. Enriquecer com threat intel (MISP).",
+            "tags": ["analise", "threat-intel", "mitre"]
+        },
+        {
+            "title": "3.1 Conter o incidente (curto prazo)",
+            "description": "Aplicar contencao imediata: isolar hosts da rede, bloquear IOCs no firewall/EDR, desabilitar contas comprometidas, revogar sessoes e tokens. Registrar cada acao de contencao com data/hora.",
+            "tags": ["contencao"]
+        },
+        {
+            "title": "3.2 Erradicar a ameaca",
+            "description": "Remover a causa raiz: eliminar malware, fechar a vulnerabilidade explorada, remover persistencia (tarefas agendadas, servicos, chaves de registro), resetar credenciais afetadas.",
+            "tags": ["erradicacao"]
+        },
+        {
+            "title": "3.3 Recuperar operacoes",
+            "description": "Restaurar sistemas a partir de backups confiaveis, revalidar integridade, reintroduzir hosts na rede de forma monitorada e confirmar retorno a operacao normal. Monitorar por reincidencia.",
+            "tags": ["recuperacao"]
+        },
+        {
+            "title": "3.4 Validar a contencao e monitorar",
+            "description": "Confirmar que a ameaca foi efetivamente contida e erradicada. Monitorar ativamente por sinais de reinfeccao ou movimento residual do atacante por um periodo definido antes de encerrar.",
+            "tags": ["recuperacao", "monitoramento"]
+        },
+        {
+            "title": "4.1 Notificacoes e obrigacoes regulatorias",
+            "description": "Avaliar obrigacoes de notificacao (LGPD/ANPD, clientes, parceiros, autoridades) conforme o tipo de dado e impacto. Registrar decisoes, prazos e comunicacoes enviadas.",
+            "tags": ["pos-incidente", "compliance", "comunicacao"]
+        },
+        {
+            "title": "4.2 Reuniao de licoes aprendidas",
+            "description": "Realizar o post-mortem com o time: o que funcionou, o que falhou, gaps de deteccao e resposta. Definir acoes de melhoria com responsaveis e prazos. Documentar no diretorio 'Licoes Aprendidas'.",
+            "tags": ["pos-incidente", "licoes-aprendidas"]
+        },
+        {
+            "title": "4.3 Atualizar deteccoes e fechar o caso",
+            "description": "Criar/ajustar regras de deteccao (Wazuh), adicionar IOCs ao MISP e as listas de bloqueio, atualizar runbooks. Preencher o relatorio final, definir a resolucao e encerrar o caso.",
+            "tags": ["pos-incidente", "deteccao", "encerramento"]
+        }
+    ],
+    "note_directories": [
+        {
+            "title": "Resumo Executivo",
+            "notes": [
+                {
+                    "title": "Visao geral do incidente",
+                    "content": "## Resumo\n\n- **O que aconteceu:**\n- **Quando foi detectado:**\n- **Como foi detectado (fonte):**\n- **Ativos afetados:**\n- **Dados afetados:**\n- **Severidade:**\n- **Status atual:**\n- **Incident lead:**\n"
+                }
+            ]
+        },
+        {
+            "title": "Linha do Tempo",
+            "notes": [
+                {
+                    "title": "Timeline do incidente",
+                    "content": "Registrar em ordem cronologica (UTC) cada evento relevante.\n\n| Data/Hora (UTC) | Evento | Fonte | Analista |\n|---|---|---|---|\n|  |  |  |  |\n"
+                }
+            ]
+        },
+        {
+            "title": "Escopo e Ativos",
+            "notes": [
+                {
+                    "title": "Hosts, contas e dados afetados",
+                    "content": "### Hosts\n\n| Host | IP | Papel | Status |\n|---|---|---|---|\n|  |  |  |  |\n\n### Contas\n\n| Conta | Dominio | Acao tomada |\n|---|---|---|\n|  |  |  |\n\n### Vetor inicial\n\n- **Vetor de acesso inicial:**\n- **Movimento lateral observado:**\n"
+                }
+            ]
+        },
+        {
+            "title": "IOCs e MITRE ATT&CK",
+            "notes": [
+                {
+                    "title": "Indicadores e tecnicas",
+                    "content": "### IOCs\n\n| Tipo | Valor | Contexto | TLP |\n|---|---|---|---|\n|  |  |  |  |\n\n### Tecnicas MITRE ATT&CK\n\n| Tatica | Tecnica (ID) | Evidencia |\n|---|---|---|\n|  |  |  |\n"
+                }
+            ]
+        },
+        {
+            "title": "Evidencias",
+            "notes": [
+                {
+                    "title": "Cadeia de custodia",
+                    "content": "Anexar arquivos de evidencia no datastore do caso e registrar aqui.\n\n| Arquivo | Hash (SHA256) | Coletado por | Data/Hora | Origem |\n|---|---|---|---|---|\n|  |  |  |  |  |\n"
+                }
+            ]
+        },
+        {
+            "title": "Acoes de Resposta",
+            "notes": [
+                {
+                    "title": "Contencao, erradicacao e recuperacao",
+                    "content": "| Data/Hora | Acao | Tipo | Executado por | Resultado |\n|---|---|---|---|---|\n|  |  | Contencao/Erradicacao/Recuperacao |  |  |\n"
+                }
+            ]
+        },
+        {
+            "title": "Comunicacao",
+            "notes": [
+                {
+                    "title": "Notificacoes e stakeholders",
+                    "content": "| Data/Hora | Destinatario | Canal | Conteudo | Responsavel |\n|---|---|---|---|---|\n|  |  |  |  |  |\n"
+                }
+            ]
+        },
+        {
+            "title": "Licoes Aprendidas",
+            "notes": [
+                {
+                    "title": "Post-mortem",
+                    "content": "### O que funcionou\n\n-\n\n### O que falhou / gaps\n\n-\n\n### Acoes de melhoria\n\n| Acao | Responsavel | Prazo | Status |\n|---|---|---|---|\n|  |  |  |  |\n"
+                }
+            ]
+        }
+    ]
+}

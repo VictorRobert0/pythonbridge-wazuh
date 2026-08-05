@@ -1,0 +1,63 @@
+#!/var/ossec/framework/python/bin/python3
+"""Integracao Wazuh -> slack-iris-bridge.
+
+O script nao fala com o IRIS nem com o Slack diretamente: apenas encaminha o
+alerta bruto para o bridge, que cuida de criar o alerta no IRIS e postar no
+Slack com o template correto.
+
+Instalar em /var/ossec/integrations/custom-bridge (chmod 750, root:wazuh).
+"""
+
+import json
+import sys
+import time
+
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+LOG = "/var/ossec/logs/integrations.log"
+DEFAULT_URL = "http://slack-iris-bridge:8000/wazuh"
+TIMEOUT = 25
+
+
+def log(msg):
+    with open(LOG, "a") as f:
+        f.write("%s custom-bridge: %s\n" % (time.strftime("%Y/%m/%d %H:%M:%S"), msg))
+
+
+def main(argv):
+    if len(argv) < 2:
+        log("ERRO: caminho do alerta nao informado")
+        sys.exit(1)
+
+    alert_file = argv[1]
+    # argv[2] = api_key (nao usado, o bridge tem as credenciais)
+    hook_url = argv[3] if len(argv) > 3 and argv[3].startswith("http") else DEFAULT_URL
+
+    try:
+        with open(alert_file) as f:
+            alert = json.load(f)
+    except Exception as e:
+        log("ERRO ao ler alerta: %s" % e)
+        sys.exit(1)
+
+    try:
+        r = requests.post(hook_url, json=alert, timeout=TIMEOUT)
+        if r.status_code >= 300:
+            log("bridge %s: %s" % (r.status_code, r.text[:300]))
+        else:
+            body = r.json() if r.content else {}
+            log("ok alert_id=%s ts=%s regra=%s" % (
+                body.get("alert_id"),
+                body.get("slack_ts"),
+                (alert.get("rule") or {}).get("id"),
+            ))
+    except Exception as e:
+        log("ERRO ao enviar para o bridge: %s" % e)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

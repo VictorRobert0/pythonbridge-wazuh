@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+*.db
+README.md
+docker-compose.bridge.yml
+slack-app-manifest.yml

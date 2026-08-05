@@ -1,6 +1,10 @@
 # Credenciais — nunca versionar
 .env
 
+# Segredos montados como arquivos (Docker secrets)
+secrets/*
+!secrets/.gitkeep
+
 # Estado em runtime
 *.db
 data/

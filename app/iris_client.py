@@ -299,39 +299,155 @@ class IrisClient:
         case_id = data.get("case_id") or data.get("id")
         return case_id, data
 
-    def add_case_note(self, case_id, title, content):
-        """Cria uma nota no case (usada para registrar evidencias recebidas)."""
-        # IRIS agrupa notas em diretorios; cria uma nota simples no case.
+    def add_case_note(self, case_id, title, content, directory_id=None):
+        """Cria uma nota no case, opcionalmente dentro de um diretorio."""
         payload = {"note_title": title, "note_content": content, "cid": case_id}
+        if directory_id is not None:
+            payload["directory_id"] = directory_id
+            payload["group_id"] = directory_id  # compat entre versoes
         return self._post("/case/notes/add?cid={}".format(case_id), payload)
 
-    def upload_case_evidence(self, case_id, filename, content_bytes, note=""):
-        """Sobe um arquivo para o datastore do case (pasta raiz).
+    def _note_directories(self, case_id):
+        """[(id, nome)] dos diretorios de nota do case. Defensivo por versao."""
+        for path in ("/case/notes/directories/filter",
+                     "/case/notes/directories/list",
+                     "/case/notes/groups/list"):
+            try:
+                data = self._get(path + "?cid={}".format(case_id))
+            except Exception:
+                continue
+            items = data.get("data")
+            dirs = []
+            if isinstance(items, list):
+                for it in items:
+                    did = it.get("id") or it.get("group_id")
+                    if did is not None:
+                        dirs.append((did, it.get("name") or it.get("group_title")))
+            elif isinstance(items, dict):
+                for k, v in items.items():
+                    if isinstance(v, dict):
+                        did = v.get("id") or v.get("group_id")
+                        if did is not None:
+                            dirs.append((did, v.get("name") or v.get("group_title") or k))
+            if dirs:
+                return dirs
+        return []
 
-        O endpoint multipart varia entre versoes; tenta os formatos conhecidos
-        do IRIS 2.4.x e devolve o dado da API. Levanta excecao com a mensagem do
-        IRIS se todos falharem, para o chamador exibir no Slack.
+    def ensure_note_directory(self, case_id, name):
+        """Retorna o id do diretorio de notas 'name', criando se preciso."""
+        for did, dname in self._note_directories(case_id):
+            if (dname or "").strip().lower() == name.strip().lower():
+                return did
+        for path in ("/case/notes/directories/add", "/case/notes/groups/add"):
+            try:
+                resp = self._post(path + "?cid={}".format(case_id),
+                                  {"name": name, "cid": case_id})
+                data = resp.get("data", {}) or {}
+                did = data.get("id") or data.get("group_id")
+                if did is not None:
+                    return did
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def datastore_image_markdown(file_info, filename, case_id):
+        """Markdown que embute imagem do datastore, no formato do proprio IRIS:
+        ![nome](/datastore/file/view/<file_id>?cid=<case>)
+        """
+        data = (file_info or {}).get("data", file_info) or {}
+        fid = data.get("file_id") or data.get("id")
+        if not fid:
+            return None
+        return "![{}](/datastore/file/view/{}?cid={})".format(filename, fid, case_id)
+
+    def _datastore_root_folder(self, case_id):
+        """Descobre o id da pasta raiz do datastore do case.
+
+        A arvore do IRIS codifica o id do diretorio NA CHAVE, no formato
+        'd-<id>' (diretorio) e 'f-<id>' (arquivo). A raiz e o primeiro 'd-<id>'
+        de nivel mais alto (ou o que tiver 'is_root').
+        """
+        import re
+        try:
+            data = self._get("/datastore/list/tree?cid={}".format(case_id))
+        except Exception as e:
+            log.warning("Nao consegui listar a arvore do datastore do case %s: %s",
+                        case_id, e)
+            return None
+        tree = data.get("data") or {}
+
+        rx = re.compile(r"^d-(\d+)$")
+        melhor = {"id": None, "depth": 10 ** 9}
+
+        def walk(node, depth):
+            if isinstance(node, dict):
+                # 1) chave no formato d-<id>: id do diretorio
+                for k, v in node.items():
+                    m = rx.match(str(k))
+                    if m:
+                        # prioriza o diretorio marcado como raiz, senao o mais raso
+                        is_root = isinstance(v, dict) and v.get("is_root")
+                        if is_root:
+                            melhor["id"] = int(m.group(1))
+                            melhor["depth"] = -1
+                        elif depth < melhor["depth"]:
+                            melhor["id"] = int(m.group(1))
+                            melhor["depth"] = depth
+                    if isinstance(v, (dict, list)):
+                        walk(v, depth + 1)
+                # 2) fallback: campo 'id' explicito num no de diretorio raiz
+                if node.get("is_root") and node.get("id") and melhor["id"] is None:
+                    melhor["id"] = node["id"]
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v, depth + 1)
+
+        walk(tree, 0)
+        if melhor["id"] is None:
+            log.warning("Raiz do datastore do case %s nao encontrada. Arvore: %s",
+                        case_id, str(tree)[:500])
+        return melhor["id"]
+
+    def upload_case_evidence(self, case_id, filename, content_bytes, note=""):
+        """Sobe um arquivo para o datastore do case.
+
+        Rota correta do IRIS 2.4.x: /datastore/file/add/<folder_id>?cid=<case>.
+        Descobre o folder raiz; se nao achar, tenta ids comuns. Levanta excecao
+        com a resposta do IRIS se tudo falhar, para o chamador exibir no Slack.
         """
         import requests as _rq
         headers = {"Authorization": "Bearer {}".format(self.key)}
+
+        folders = []
+        root = self._datastore_root_folder(case_id)
+        if root is not None:
+            folders.append(root)
+        folders += [f for f in (1, 2) if f not in folders]  # fallback
+
         last_err = None
-        # parent id 1 costuma ser a pasta raiz do datastore do case
-        candidatos = [
-            "/case/datastore/file/add/1?cid={}".format(case_id),
-            "/case/datastore/file/add?cid={}".format(case_id),
-        ]
-        for path in candidatos:
+        for fid in folders:
+            path = "/datastore/file/add/{}?cid={}".format(fid, case_id)
             try:
                 files = {"file_content": (filename, content_bytes)}
-                data = {"file_original_name": filename,
-                        "file_description": note or "Evidencia via Slack",
-                        "file_is_ioc": "false", "file_password": "",
-                        "cid": str(case_id)}
+                data = {
+                    "file_original_name": filename,
+                    "file_description": note or "Evidencia via Slack",
+                    "file_is_ioc": "false",
+                    "file_is_evidence": "true",
+                    "file_password": "",
+                    "file_tags": "slack,evidencia",
+                    "cid": str(case_id),
+                }
                 r = _rq.post(self.base + path, headers=headers, files=files,
                              data=data, verify=self.verify, timeout=60)
                 if r.status_code < 300:
                     return r.json()
-                last_err = "{}: {}".format(r.status_code, r.text[:300])
+                # ignora 404 (pasta errada) e tenta a proxima
+                snippet = r.text[:200].replace("\n", " ")
+                last_err = "{} em {}: {}".format(r.status_code, path, snippet)
+                if r.status_code != 404:
+                    break
             except Exception as e:
                 last_err = str(e)
         raise RuntimeError("upload de evidencia falhou ({})".format(last_err))

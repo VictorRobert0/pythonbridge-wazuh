@@ -10,9 +10,9 @@ atribui o alerta ao usuario IRIS correspondente ao usuario do Slack (casado
 por e-mail) e registra a autoria em nota/comentario.
 """
 
+import hmac
 import json
 import logging
-import os
 import threading
 import time
 
@@ -21,49 +21,50 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 import templates
+from config import settings
 from iris_client import IrisClient
 from store import Store
+from queue_worker import AlertQueue, run_worker
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=settings.LOG_LEVEL,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 log = logging.getLogger("bridge")
 
 # ---------------------------------------------------------------- config
 
-SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
-SLACK_CHANNEL = os.getenv("SLACK_CHANNEL", "#soc-alerts")
+settings.require("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "IRIS_API_KEY", "IRIS_URL_INTERNAL")
 
-IRIS_URL_INTERNAL = os.getenv("IRIS_URL_INTERNAL", "https://iris-nginx")
-IRIS_URL_PUBLIC = os.getenv("IRIS_URL_PUBLIC", "https://192.168.18.10")
-IRIS_API_KEY = os.environ["IRIS_API_KEY"]
-IRIS_CUSTOMER_ID = int(os.getenv("IRIS_CUSTOMER_ID", "1"))
-
-WAZUH_DASHBOARD_URL = os.getenv("WAZUH_DASHBOARD_URL", "https://192.168.18.10:4443")
-DB_PATH = os.getenv("DB_PATH", "/data/bridge.db")
-BRIDGE_PORT = int(os.getenv("BRIDGE_PORT", "8000"))
-
-# Mapeamento manual opcional: {"U01ABC": "login_no_iris"}
-USER_MAP = json.loads(os.getenv("SLACK_IRIS_USER_MAP", "{}"))
-
-# Fechar abrindo modal (resolucao + nota) em vez de fechar direto.
-CLOSE_WITH_MODAL = os.getenv("CLOSE_WITH_MODAL", "false").lower() in ("1", "true", "yes")
-
-# Resolucao aplicada ao fechar sem modal. Vazio = nao definir.
-IRIS_DEFAULT_RESOLUTION = os.getenv("IRIS_DEFAULT_RESOLUTION", "").strip()
+SLACK_BOT_TOKEN = settings.SLACK_BOT_TOKEN
+SLACK_APP_TOKEN = settings.SLACK_APP_TOKEN
+SLACK_CHANNEL = settings.SLACK_CHANNEL
+IRIS_URL_PUBLIC = settings.IRIS_URL_PUBLIC
+IRIS_CUSTOMER_ID = settings.IRIS_CUSTOMER_ID
+WAZUH_DASHBOARD_URL = settings.WAZUH_DASHBOARD_URL
+USER_MAP = settings.USER_MAP
+CLOSE_WITH_MODAL = settings.CLOSE_WITH_MODAL
+IRIS_DEFAULT_RESOLUTION = settings.IRIS_DEFAULT_RESOLUTION
 
 iris = IrisClient(
-    IRIS_URL_INTERNAL, IRIS_API_KEY, verify_ssl=False, customer_id=IRIS_CUSTOMER_ID
+    settings.IRIS_URL_INTERNAL, settings.IRIS_API_KEY,
+    verify_ssl=settings.resolve_verify(), customer_id=IRIS_CUSTOMER_ID,
 )
 iris.base_public = IRIS_URL_PUBLIC
-store = Store(DB_PATH)
+store = Store(settings.DB_PATH)
+alert_queue = AlertQueue(settings.DB_PATH)
 
 bolt = App(token=SLACK_BOT_TOKEN)
 flask_app = Flask(__name__)
 
 _slack_user_cache = {}
+
+if not settings.IRIS_VERIFY_TLS and not settings.IRIS_CA_BUNDLE:
+    log.warning("IRIS_VERIFY_TLS desligado — OK para lab, mas ATIVE em producao "
+                "(IRIS_VERIFY_TLS=true e/ou IRIS_CA_BUNDLE).")
+if not settings.INGEST_TOKEN:
+    log.warning("INGEST_TOKEN vazio — endpoint /wazuh sem autenticacao. "
+                "Defina um token em producao.")
 
 
 def _stamp():
@@ -178,48 +179,54 @@ def build_iris_payload(alert):
     return payload, ctx
 
 
+def _authorized(req):
+    """Valida o token de ingestao (header X-Bridge-Token ou ?token=)."""
+    if not settings.INGEST_TOKEN:
+        return True  # lab sem token
+    enviado = req.headers.get("X-Bridge-Token") or req.args.get("token") or ""
+    return hmac.compare_digest(enviado, settings.INGEST_TOKEN)
+
+
+def process_alert(alert):
+    """Cria o alerta no IRIS e posta no Slack. Chamado pelo worker da fila.
+
+    Levanta excecao em qualquer falha para que o worker faca retry (garante que
+    o alerta nao se perde se IRIS/Slack estiverem indisponiveis).
+    """
+    payload, ctx = build_iris_payload(alert)
+    alert_id, _ = iris.create_alert(payload)
+
+    blocks, color, fallback = templates.render(
+        alert, alert_id, IRIS_URL_PUBLIC, WAZUH_DASHBOARD_URL
+    )
+    resp = bolt.client.chat_postMessage(
+        channel=SLACK_CHANNEL,
+        attachments=[{"color": color, "fallback": fallback, "blocks": blocks}],
+    )
+    ts = resp["ts"]
+    store.link(
+        ts, resp["channel"], alert_id, ctx.description,
+        ctx.decoder, ctx.rule_id, ctx.level, alert,
+    )
+    log.info("Alerta IRIS #%s postado no Slack (ts=%s)", alert_id, ts)
+
+
 @flask_app.post("/wazuh")
 def ingest():
+    if not _authorized(request):
+        return jsonify({"error": "nao autorizado"}), 401
     alert = request.get_json(force=True, silent=True)
     if not alert:
         return jsonify({"error": "json invalido"}), 400
-
-    try:
-        payload, ctx = build_iris_payload(alert)
-        alert_id, _ = iris.create_alert(payload)
-    except Exception as e:
-        log.exception("Falha ao criar alerta no IRIS")
-        return jsonify({"error": "iris: {}".format(e)}), 502
-
-    try:
-        blocks, color, fallback = templates.render(
-            alert, alert_id, IRIS_URL_PUBLIC, WAZUH_DASHBOARD_URL
-        )
-        # Sem "text": passar text junto com attachments faz o Slack renderizar
-        # uma linha extra acima do card. O fallback vai no proprio attachment,
-        # que e o que aparece na notificacao e na lista de canais.
-        resp = bolt.client.chat_postMessage(
-            channel=SLACK_CHANNEL,
-            attachments=[
-                {"color": color, "fallback": fallback, "blocks": blocks}
-            ],
-        )
-        ts = resp["ts"]
-        store.link(
-            ts, resp["channel"], alert_id, ctx.description,
-            ctx.decoder, ctx.rule_id, ctx.level, alert,
-        )
-        log.info("Alerta IRIS #%s postado no Slack (ts=%s)", alert_id, ts)
-    except Exception as e:
-        log.exception("Falha ao postar no Slack")
-        return jsonify({"alert_id": alert_id, "slack_error": str(e)}), 207
-
-    return jsonify({"alert_id": alert_id, "slack_ts": ts}), 200
+    # Enfileira e responde rapido; o worker processa com retry. Assim nenhum
+    # alerta se perde se o IRIS ou o Slack estiverem fora no momento.
+    qid = alert_queue.enqueue(alert)
+    return jsonify({"queued": qid}), 202
 
 
 @flask_app.get("/health")
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "queue": alert_queue.stats()}), 200
 
 
 # ---------------------------------------------------------------- acoes Slack
@@ -645,68 +652,176 @@ def _download_slack_file(url):
     return r.content
 
 
-def _ensure_case(alert_id, autor):
-    """Garante que existe um case para o alerta (cria se preciso). Retorna case_id."""
-    case_id = store.get_case(alert_id)
-    if case_id:
-        return case_id
-    nota = "Case criado automaticamente para anexar evidencia enviada por {} (Slack).".format(autor)
-    case_id, _ = iris.escalate_alert(alert_id, note=nota)
-    if case_id:
-        store.set_case(alert_id, case_id)
-        iris.append_note(alert_id, "{} {}".format(_stamp(), nota))
-    return case_id
+def _is_image(f):
+    return ((f.get("mimetype") or "").startswith("image/")
+            or (f.get("filetype") or "") in ("png", "jpg", "jpeg", "gif", "webp", "bmp"))
 
 
-def _handle_thread_files(event, link, client, autor):
-    """Encaminha imagens/anexos da thread para o case do alerta no IRIS."""
-    files = event.get("files") or []
-    imagens = [f for f in files if (f.get("mimetype") or "").startswith("image/")
-               or (f.get("filetype") or "") in ("png", "jpg", "jpeg", "gif", "webp", "bmp")]
-    # tambem aceita outros anexos como evidencia
-    outros = [f for f in files if f not in imagens]
-    todos = imagens + outros
-    if not todos:
-        return
+def _attach_files_to_case(case_id, arquivos, autor, alert_id, channel, thread_ts,
+                          msg_ts, client):
+    """Baixa os arquivos do Slack e anexa ao datastore do case (+ nota inline).
 
-    channel, ts = event["channel"], event["ts"]
-    try:
-        case_id = _ensure_case(link["alert_id"], autor)
-    except Exception as e:
-        log.exception("Falha ao garantir case para evidencia (alerta %s)", link["alert_id"])
-        client.chat_postMessage(
-            channel=channel, thread_ts=event.get("thread_ts"),
-            text=":x: Nao consegui preparar o case para anexar a evidencia: `{}`".format(e))
-        return
-
+    `arquivos`: lista de dicts {name, url, is_image}. Retorna qtd anexada.
+    """
     ok = 0
-    for f in todos:
-        nome = f.get("name") or "evidencia"
-        url = f.get("url_private_download") or f.get("url_private")
+    imagens_md = []
+    for a in arquivos:
+        nome = a.get("name") or "evidencia"
+        url = a.get("url")
         if not url:
             continue
         try:
             conteudo = _download_slack_file(url)
-            iris.upload_case_evidence(
+            info = iris.upload_case_evidence(
                 case_id, nome, conteudo,
-                note="Evidencia enviada por {} (Slack) no alerta #{}".format(
-                    autor, link["alert_id"]))
+                note="Evidencia enviada por {} (Slack) no alerta #{}".format(autor, alert_id))
             ok += 1
+            if a.get("is_image"):
+                md = iris.datastore_image_markdown(info, nome, case_id)
+                if md:
+                    imagens_md.append(md)
         except Exception as e:
             log.exception("Falha ao enviar evidencia %s ao IRIS", nome)
             client.chat_postMessage(
-                channel=channel, thread_ts=event.get("thread_ts"),
+                channel=channel, thread_ts=thread_ts,
                 text=":x: Nao consegui anexar `{}` ao IRIS: `{}`".format(nome, e))
 
-    if ok:
-        iris.append_note(
-            link["alert_id"],
-            "{} — {} anexou {} evidencia(s) ao case #{} (Slack).".format(
-                _stamp(), autor, ok, case_id))
+    if not ok:
+        return 0
+
+    iris.append_note(
+        alert_id,
+        "{} — {} anexou {} evidencia(s) ao case #{} (Slack).".format(
+            _stamp(), autor, ok, case_id))
+
+    if imagens_md:
         try:
-            client.reactions_add(channel=channel, timestamp=ts, name="paperclip")
+            dir_id = iris.ensure_note_directory(case_id, "Evidencias")
+            corpo = "Enviado por {} a partir do alerta #{}.\n\n{}".format(
+                autor, alert_id, "\n\n".join(imagens_md))
+            iris.add_case_note(case_id, "Evidencia Slack {}".format(_stamp()),
+                               corpo, directory_id=dir_id)
+        except Exception:
+            log.exception("Nao consegui embutir imagem na nota do case %s "
+                          "(evidencia ja esta no datastore).", case_id)
+
+    if msg_ts:
+        try:
+            client.reactions_add(channel=channel, timestamp=msg_ts, name="paperclip")
         except Exception:
             pass
+    return ok
+
+
+def _handle_thread_files(event, link, client, autor):
+    """Encaminha anexos da thread para o case. Se nao houver case, PERGUNTA."""
+    files = event.get("files") or []
+    if not files:
+        return
+    channel, ts = event["channel"], event["ts"]
+    alert_id = link["alert_id"]
+    arquivos = [
+        {"name": f.get("name") or "evidencia",
+         "url": f.get("url_private_download") or f.get("url_private"),
+         "is_image": _is_image(f)}
+        for f in files
+    ]
+
+    case_id = store.get_case(alert_id)
+    if case_id:
+        _attach_files_to_case(case_id, arquivos, autor, alert_id, channel,
+                              event.get("thread_ts"), ts, client)
+        return
+
+    # Sem case: nao cria sozinho. Pergunta (efemero, so o autor ve).
+    file_ids = [f.get("id") for f in files if f.get("id")]
+    val = json.dumps({"a": alert_id, "c": channel, "t": event.get("thread_ts"),
+                      "m": ts, "f": file_ids})
+    try:
+        client.chat_postEphemeral(
+            channel=channel, user=event.get("user"), thread_ts=event.get("thread_ts"),
+            text="Este alerta ainda nao tem case.",
+            blocks=[
+                {"type": "section", "text": {"type": "mrkdwn",
+                 "text": ":paperclip: Este alerta (*#{}*) ainda nao tem case. "
+                         "Deseja criar um case e anexar a evidencia?".format(alert_id)}},
+                {"type": "actions", "elements": [
+                    {"type": "button", "style": "primary",
+                     "action_id": "attach_create_case",
+                     "text": {"type": "plain_text", "text": "Criar case e anexar"},
+                     "value": val},
+                    {"type": "button", "action_id": "attach_dismiss",
+                     "text": {"type": "plain_text", "text": "Agora nao"},
+                     "value": "x"},
+                ]},
+            ],
+        )
+    except Exception:
+        log.exception("Falha ao perguntar sobre criar case para evidencia")
+
+
+@bolt.action("attach_dismiss")
+def handle_attach_dismiss(ack, respond):
+    ack()
+    # substitui a mensagem efemera por uma confirmacao (remove os botoes)
+    respond(replace_original=True, blocks=[],
+            text=":ok_hand: Evidencia *nao* anexada. Voce pode clicar em "
+                 "*Criar case* no alerta quando quiser trata-lo.")
+
+
+@bolt.action("attach_create_case")
+def handle_attach_create_case(ack, body, client, respond):
+    ack()
+    respond(replace_original=True, blocks=[], text=":hourglass_flowing_sand: Criando o case e anexando...")
+    val = json.loads(body["actions"][0]["value"])
+    alert_id, channel, thread_ts, msg_ts = val["a"], val["c"], val["t"], val["m"]
+    file_ids = val.get("f") or []
+    slack_uid = body["user"]["id"]
+    iris_user, info = resolve_iris_user(slack_uid)
+    autor = iris_user["name"] if iris_user else info["name"]
+
+    # cria o case
+    try:
+        nota = "Case criado por {} (Slack) para anexar evidencia.".format(autor)
+        case_id, _ = iris.escalate_alert(alert_id, note=nota)
+        if case_id:
+            store.set_case(alert_id, case_id)
+            iris.append_note(alert_id, "{} {}".format(_stamp(), nota))
+    except Exception as e:
+        log.exception("Falha ao criar case para evidencia (alerta %s)", alert_id)
+        respond(replace_original=True, blocks=[],
+                text=":x: Nao consegui criar o case: `{}`".format(e))
+        return
+
+    # re-resolve os arquivos pelo id (o Slack ainda os tem)
+    arquivos = []
+    for fid in file_ids:
+        try:
+            fi = client.files_info(file=fid)["file"]
+            arquivos.append({
+                "name": fi.get("name") or "evidencia",
+                "url": fi.get("url_private_download") or fi.get("url_private"),
+                "is_image": _is_image(fi),
+            })
+        except Exception:
+            log.exception("Nao consegui reler o arquivo %s do Slack", fid)
+
+    n = _attach_files_to_case(case_id, arquivos, autor, alert_id, channel,
+                              thread_ts, msg_ts, client)
+    link_case = "<{}/case?cid={}|case #{}>".format(
+        IRIS_URL_PUBLIC.rstrip("/"), case_id, case_id)
+    if n:
+        respond(replace_original=True, blocks=[],
+                text=":white_check_mark: Criei o {} e anexei {} evidencia(s).".format(
+                    link_case, n))
+    else:
+        respond(replace_original=True, blocks=[],
+                text=":warning: Criei o {}, mas nao consegui anexar a evidencia "
+                     "(veja o log).".format(link_case))
+    _append_context(
+        channel, msg_ts,
+        ":file_folder: <@{}> criou {} e anexou {} evidencia(s).".format(
+            slack_uid, link_case, n))
 
 
 @bolt.event("message")
@@ -759,8 +874,17 @@ def handle_thread_reply(event, client):
 
 def run_flask():
     from waitress import serve
-    log.info("Ingest HTTP escutando em 0.0.0.0:%s", BRIDGE_PORT)
-    serve(flask_app, host="0.0.0.0", port=BRIDGE_PORT, threads=8)
+    log.info("Ingest HTTP escutando em 0.0.0.0:%s", settings.BRIDGE_PORT)
+    serve(flask_app, host="0.0.0.0", port=settings.BRIDGE_PORT, threads=8)
+
+
+def run_queue_worker():
+    run_worker(
+        alert_queue, process_alert,
+        max_attempts=settings.QUEUE_MAX_ATTEMPTS,
+        poll_sec=settings.QUEUE_POLL_SEC,
+        backoff_base=settings.QUEUE_BACKOFF_BASE_SEC,
+    )
 
 
 if __name__ == "__main__":
@@ -770,5 +894,6 @@ if __name__ == "__main__":
         log.warning("Lookups do IRIS falharam no boot — tentara sob demanda")
 
     threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=run_queue_worker, daemon=True).start()
     log.info("Conectando ao Slack via Socket Mode...")
     SocketModeHandler(bolt, SLACK_APP_TOKEN).start()

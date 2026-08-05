@@ -78,7 +78,7 @@ guardar o vínculo `thread_ts ↔ alert_id` que faz a thread virar nota. O bridg
 | **Assumir** | status → *Assigned*, `alert_owner_id` = usuário mapeado, entrada na nota |
 | **Criar case** | abre modal com título, **template do IRIS** (se houver) e nota → escala o alerta para um case (`/alerts/escalate`), importando IOCs e assets; registra autor e link do case |
 | **Fechar** | abre modal com resolução (falso positivo, legítimo, etc) e nota → status *Closed*, resolução, owner, entrada na nota, botões somem da mensagem |
-| **Imagem/arquivo na thread** | é baixado do Slack e anexado como **evidência ao case** do alerta (cria o case automaticamente se ainda não existir); o bot reage com 📎 |
+| **Imagem/arquivo na thread** | é anexado como **evidência ao case** do alerta (upload no datastore + imagem embutida na nota "Evidências"); o bot reage com 📎. Se o alerta ainda **não tem case**, o bridge pergunta (mensagem efêmera, só quem enviou vê) se deseja criar um case e anexar — não cria nada sozinho |
 | **Resposta na thread** | entrada carimbada na nota; bot reage com 📥 ao sincronizar |
 
 A nota vira o histórico cronológico do alerta:
@@ -155,7 +155,18 @@ Derivada do `rule.level`: ≥15 `CRITICAL` · ≥12 `HIGH` · ≥8 `MEDIUM` ·
 | `WAZUH_INDEX_PATTERN` | `wazuh-alerts-*` | index pattern do Discover |
 | `DC_AGENTS` | `dc01-ad` | agentes que são Domain Controller, separados por vírgula |
 | `SLACK_IRIS_USER_MAP` | `{}` | `{"U01ABC":"login_no_iris"}` quando o e-mail não bate |
+| `INGEST_TOKEN` | vazio | token exigido no `POST /wazuh`; vazio = sem auth (só lab) |
+| `IRIS_VERIFY_TLS` | `false` | `true` valida o cert do IRIS (produção) |
+| `IRIS_CA_BUNDLE` | vazio | caminho de uma CA para validar o IRIS (prioridade sobre o toggle) |
+| `SOC_NETWORK` | `soc-lab_soc-net` | nome da rede Docker do stack de SOC |
+| `QUEUE_MAX_ATTEMPTS` | `6` | tentativas antes do dead-letter |
+| `QUEUE_POLL_SEC` | `2` | intervalo de polling do worker |
+| `QUEUE_BACKOFF_BASE_SEC` | `5` | base do backoff exponencial |
 | `LOG_LEVEL` | `INFO` | `DEBUG` para depurar |
+
+Qualquer segredo (`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `IRIS_API_KEY`,
+`INGEST_TOKEN`) pode ser lido de um arquivo em vez do ambiente: defina
+`<NOME>_FILE=/caminho` (padrão Docker/K8s secrets). O arquivo tem prioridade.
 
 ### Identidade
 
@@ -166,6 +177,63 @@ a mensagem mostra *(não mapeado)*.
 
 Para corrigir: pegue o member ID no Slack (perfil → ⋮ → **Copy member ID**) e
 preencha `SLACK_IRIS_USER_MAP={"U01ABCDEF":"administrator"}`.
+
+---
+
+## Produção e escala
+
+O bridge foi desenhado para ser **simples por padrão e escalar quando preciso**.
+
+**Fluxo durável.** A ingestão (`POST /wazuh`) não processa o alerta na hora:
+ela **enfileira** (persistido em disco) e responde `202`. Um worker consome a
+fila e cria o alerta no IRIS + posta no Slack, com **retry exponencial**. Se o
+IRIS ou o Slack estiverem fora no momento, o alerta espera e é reprocessado —
+nada se perde. Após `QUEUE_MAX_ATTEMPTS` falhas, vai para *dead-letter* (fica no
+banco com status `dead` e é logado). O estado da fila aparece em `GET /health`.
+
+### Pequeno / médio (1 a alguns clientes) — instância única
+
+O padrão. Use o perfil de produção, que monta segredos como arquivos, aplica
+limites de recurso, rotação de log e restart automático:
+
+```bash
+# 1. crie os arquivos de segredo (um valor por arquivo, sem newline extra)
+printf '%s' 'xoxb-...' > secrets/slack_bot_token
+printf '%s' 'xapp-...' > secrets/slack_app_token
+printf '%s' '<iris-api-key>' > secrets/iris_api_key
+printf '%s' '<token-forte>' > secrets/ingest_token
+
+# 2. no .env: IRIS_VERIFY_TLS=true (com cert real) e INGEST_TOKEN vazio
+#    (o valor vem do arquivo). Ajuste SOC_NETWORK.
+
+# 3. suba
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+No `ossec.conf` da integração, use no `<api_key>` **o mesmo valor** de
+`secrets/ingest_token` — é assim que o Wazuh se autentica no bridge.
+
+**Checklist de produção:** `INGEST_TOKEN` definido · `IRIS_VERIFY_TLS=true` (ou
+`IRIS_CA_BUNDLE`) · segredos em arquivos, não em texto · rede do SOC restrita ao
+que precisa alcançar a porta 8000.
+
+### Grande / HA (alto volume, múltiplas réplicas)
+
+Uma instância aguenta bem o volume de um SOC pequeno/médio. Para HA (mais de uma
+réplica) ou alto volume, dois componentes precisam sair do SQLite local — e o
+código já está isolado nesses dois pontos para facilitar a troca:
+
+- **Fila** (`app/queue_worker.py`) — hoje SQLite. Para várias réplicas
+  compartilharem trabalho, troque o backend por **Redis/RabbitMQ** (a interface
+  `enqueue`/`_claim`/`_done`/`_fail` é o contrato a reimplementar).
+- **Estado** (`app/store.py`) — vínculo thread↔alerta e a nota. Para réplicas,
+  aponte para **Postgres** e troque o lock de nota em processo por um lock de
+  linha do banco (`SELECT ... FOR UPDATE`).
+
+Com esses dois em backend compartilhado, você roda N réplicas do bridge atrás do
+mesmo canal do Slack (Socket Mode balanceia entre as conexões) e do mesmo IRIS.
+Enquanto não precisar disso, a instância única com a fila durável já entrega
+produção confiável.
 
 ---
 

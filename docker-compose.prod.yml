@@ -1,0 +1,75 @@
+# Perfil de PRODUCAO do SOC Bridge.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Diferencas para o compose de lab:
+#   - segredos montados como Docker secrets (arquivos), nao em texto no ambiente
+#   - limites de recurso e politica de restart
+#   - logging com rotacao
+#   - healthcheck usado por orquestradores
+#
+# Requisitos:
+#   - a rede externa do seu stack de SOC (ajuste SOC_NETWORK no .env)
+#   - arquivos de segredo em ./secrets/ (veja secrets/ mais abaixo)
+
+services:
+  slack-iris-bridge:
+    build: .
+    image: soc-lab/slack-iris-bridge:1.0
+    container_name: slack-iris-bridge
+    hostname: slack-iris-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # aponta o app para os segredos montados (o config.py le *_FILE)
+      SLACK_BOT_TOKEN_FILE: /run/secrets/slack_bot_token
+      SLACK_APP_TOKEN_FILE: /run/secrets/slack_app_token
+      IRIS_API_KEY_FILE: /run/secrets/iris_api_key
+      INGEST_TOKEN_FILE: /run/secrets/ingest_token
+    secrets:
+      - slack_bot_token
+      - slack_app_token
+      - iris_api_key
+      - ingest_token
+    volumes:
+      - bridge-data:/data
+      # monte aqui a CA do IRIS se usar IRIS_CA_BUNDLE=/certs/ca.pem
+      # - ./certs:/certs:ro
+    networks:
+      - soc-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+secrets:
+  slack_bot_token:
+    file: ./secrets/slack_bot_token
+  slack_app_token:
+    file: ./secrets/slack_app_token
+  iris_api_key:
+    file: ./secrets/iris_api_key
+  ingest_token:
+    file: ./secrets/ingest_token
+
+volumes:
+  bridge-data:
+
+networks:
+  soc-net:
+    external: true
+    name: ${SOC_NETWORK:-soc-lab_soc-net}

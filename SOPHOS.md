@@ -86,8 +86,19 @@ No `docker-compose.yml` do stack, no serviço do manager:
 
 ```yaml
     ports:
-      - "514:514/udp"
+      - "0.0.0.0:514:514/udp"   # o 0.0.0.0: e obrigatorio — veja abaixo
 ```
+
+> **Docker Desktop no Windows: bind IPv6-only.** Com `- "514:514/udp"` o Docker
+> reporta `514/udp -> 0.0.0.0:514`, mas na prática cria o socket **apenas em
+> IPv6**. Todo pacote IPv4 (que é o caso do syslog do Sophos) é descartado pelo
+> host, em silêncio. Prefixar com `0.0.0.0:` força o bind IPv4.
+>
+> Como detectar:
+> ```powershell
+> Get-NetUDPEndpoint -LocalPort 514 | Select-Object LocalAddress, LocalPort
+> ```
+> Se aparecer só `::`, o IPv4 não está escutando. Tem que aparecer `0.0.0.0`.
 
 E no `ossec.conf`:
 
@@ -193,6 +204,33 @@ sem erro.
 | Chega no `archives` mas não vira alerta | falta o decoder (2.2) |
 | Só aparecem eventos NetBIOS | o Sophos **não loga tráfego permitido** — só drops; ligue o log na regra |
 | Nada após mudar config | o serviço de log do SFOS às vezes precisa de **Aplicar** ou reinício do appliance |
+| Sophos transmite mas nada chega | **bind IPv6-only do Docker** (ver 2.1) ou Firewall do Windows bloqueando UDP 514 |
+
+### Bissecção quando o log não chega
+
+Faça nesta ordem — cada passo elimina uma camada:
+
+```bash
+# 1. o Sophos esta transmitindo?  (console do Sophos > 4 Device Console)
+tcpdump "host <IP_DO_WAZUH> and port 514"
+#    pacotes "SYSLOG daemon.info" = o appliance cumpre a parte dele
+
+# 2. o host escuta em IPv4?
+#    (PowerShell) Get-NetUDPEndpoint -LocalPort 514
+#    so ':: ' = bind IPv6-only, os pacotes IPv4 morrem aqui
+
+# 3. o caminho host -> container funciona?
+#    envie um syslog de teste do proprio host e procure no archives
+```
+
+No lab, o Firewall do Windows também precisou de regras explícitas:
+
+```powershell
+New-NetFirewallRule -DisplayName "Syslog-Wazuh-514" -Direction Inbound `
+  -Protocol UDP -LocalPort 514 -Action Allow -Profile Any
+New-NetFirewallRule -DisplayName "ICMP-Lab" -Direction Inbound `
+  -Protocol ICMPv4 -IcmpType 8 -Action Allow -Profile Any
+```
 
 Ver o que está chegando:
 

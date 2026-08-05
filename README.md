@@ -6,6 +6,8 @@ respostas na thread entram na nota do alerta, e imagens viram evidência no case
 
 > Para montar o ambiente do zero (AD, agente Wazuh, IRIS, bridge), veja
 > [RUNBOOK-REPLICACAO.md](RUNBOOK-REPLICACAO.md).
+> Para a integração com o firewall (logs + botão Banir IP), veja
+> [SOPHOS.md](SOPHOS.md).
 
 ## Quickstart
 
@@ -77,6 +79,7 @@ guardar o vínculo `thread_ts ↔ alert_id` que faz a thread virar nota. O bridg
 |---|---|
 | **Assumir** | status → *Assigned*, `alert_owner_id` = usuário mapeado, entrada na nota |
 | **Criar case** | abre modal com título, **template do IRIS** (se houver) e nota → escala o alerta para um case (`/alerts/escalate`), importando IOCs e assets; registra autor e link do case |
+| **Banir IP** | (só quando `SOPHOS_*` está configurado e o alerta tem IP público) abre confirmação → adiciona o IP ao grupo de bloqueio do Sophos, que uma regra DROP descarta; registra na nota do alerta |
 | **Fechar** | abre modal com resolução (falso positivo, legítimo, etc) e nota → status *Closed*, resolução, owner, entrada na nota, botões somem da mensagem |
 | **Imagem/arquivo na thread** | é anexado como **evidência ao case** do alerta (upload no datastore + imagem embutida na nota "Evidências"); o bot reage com 📎. Se o alerta ainda **não tem case**, o bridge pergunta (mensagem efêmera, só quem enviou vê) se deseja criar um case e anexar — não cria nada sozinho |
 | **Resposta na thread** | entrada carimbada na nota; bot reage com 📥 ao sincronizar |
@@ -159,6 +162,10 @@ Derivada do `rule.level`: ≥15 `CRITICAL` · ≥12 `HIGH` · ≥8 `MEDIUM` ·
 | `IRIS_VERIFY_TLS` | `false` | `true` valida o cert do IRIS (produção) |
 | `IRIS_CA_BUNDLE` | vazio | caminho de uma CA para validar o IRIS (prioridade sobre o toggle) |
 | `SOC_NETWORK` | `soc-lab_soc-net` | nome da rede Docker do stack de SOC |
+| `SOPHOS_URL` | vazio | ex: `https://172.16.16.16:4444` — vazio desliga o botão Banir IP |
+| `SOPHOS_USER` / `SOPHOS_PASS` | — | credenciais da API do SFOS (ver [SOPHOS.md](SOPHOS.md)) |
+| `SOPHOS_BLOCK_GROUP` | `SOC_Blocklist` | IP Host Group referenciado pela regra DROP |
+| `SOPHOS_VERIFY_TLS` | `false` | `true` valida o certificado do firewall |
 | `QUEUE_MAX_ATTEMPTS` | `6` | tentativas antes do dead-letter |
 | `QUEUE_POLL_SEC` | `2` | intervalo de polling do worker |
 | `QUEUE_BACKOFF_BASE_SEC` | `5` | base do backoff exponencial |

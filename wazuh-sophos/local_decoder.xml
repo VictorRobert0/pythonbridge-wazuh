@@ -1,0 +1,10 @@
+<!-- Decoder Sophos SFOS (syslog key="value") -->
+<decoder name="sophos-fw">
+  <prematch>device_name="SophosFirewall"</prematch>
+</decoder>
+
+<decoder name="sophos-fw-fields">
+  <parent>sophos-fw</parent>
+  <regex type="pcre2">log_type="([^"]+)".*?log_subtype="([^"]+)".*?severity="([^"]+)".*?src_ip="([^"]+)".*?dst_ip="([^"]+)".*?dst_port=(\d+)</regex>
+  <order>sophos.log_type,sophos.action,sophos.severity,srcip,dstip,sophos.dstport</order>
+</decoder>

@@ -1,0 +1,23 @@
+<group name="sophos,local,">
+  <!-- trafego bloqueado pelo firewall (descende da regra nativa 70020) -->
+  <rule id="100210" level="8">
+    <if_sid>70020</if_sid>
+    <field name="sophos.action">Denied|Drop</field>
+    <description>Sophos: trafego BLOQUEADO de $(srcip) para $(dstip)</description>
+    <group>firewall_drop,</group>
+  </rule>
+
+  <!-- silencia o ruido de broadcast (NetBIOS/mDNS/SSDP) -->
+  <rule id="100201" level="0">
+    <if_sid>100210</if_sid>
+    <field name="sophos.dstport">^137$|^138$|^5353$|^1900$</field>
+    <description>Sophos: broadcast NetBIOS/mDNS/SSDP (ruido) - silenciado</description>
+  </rule>
+
+  <!-- deteccoes de seguranca de verdade -->
+  <rule id="100220" level="10">
+    <if_sid>70020</if_sid>
+    <field name="sophos.log_type">IPS|ATP|Anti-Virus</field>
+    <description>Sophos: deteccao $(sophos.log_type)</description>
+  </rule>
+</group>

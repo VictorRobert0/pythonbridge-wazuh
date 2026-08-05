@@ -32,6 +32,8 @@ SOURCE_LABELS = {
     "docker-listener": "DOCKER",
     "docker": "DOCKER",
     "sshd": "SSH",
+    "sophos-fw": "SOPHOS FIREWALL",
+    "sophos": "SOPHOS FIREWALL",
     "web-accesslog": "WEB",
     "apache-accesslog": "WEB",
     "nginx-accesslog": "WEB",
@@ -457,6 +459,38 @@ def _docker(ctx):
     )
 
 
+@template("sophos-fw", "sophos")
+def _sophos(ctx):
+    """Alertas de infra vindos do Sophos Firewall (syslog key=value)."""
+    d = ctx.data
+    acao = d.get("sophos", {}).get("action") if isinstance(d.get("sophos"), dict) else None
+    acao = acao or ctx.d("action") or "-"
+    tipo = (d.get("sophos", {}).get("log_type")
+            if isinstance(d.get("sophos"), dict) else None) or "Firewall"
+    porta = (d.get("sophos", {}).get("dstport")
+             if isinstance(d.get("sophos"), dict) else None) or ctx.d("dstport")
+
+    bloqueado = str(acao).lower() in ("denied", "drop", "deny")
+    icone = ":no_entry:" if bloqueado else ":globe_with_meridians:"
+    titulo = "Trafego BLOQUEADO" if bloqueado else "Evento de rede"
+
+    blocks = [section("{} *{}*  ·  {}".format(icone, titulo, tipo))]
+    blocks += fields([
+        ("IP de origem", ctx.d("srcip")),
+        ("IP de destino", ctx.d("dstip")),
+        ("Porta destino", porta),
+        ("Protocolo", ctx.d("protocol")),
+        ("Acao do firewall", acao),
+        ("Interface", ctx.d("in_interface")),
+    ])
+    if bloqueado:
+        blocks.append(context([
+            ":shield: Bloqueio aplicado pelo Sophos. Se este IP for hostil, "
+            "use *Banir IP* para adiciona-lo permanentemente a blocklist."
+        ]))
+    return blocks
+
+
 @template("sshd")
 def _sshd(ctx):
     return [section(":closed_lock_with_key: *Atividade SSH*")] + fields(
@@ -512,8 +546,12 @@ def _generic(ctx):
 
 # ---------------------------------------------------------------- render
 
-def render(alert, iris_alert_id, iris_url, wazuh_url, extra_context=None):
+def render(alert, iris_alert_id, iris_url, wazuh_url, extra_context=None,
+           ban_ip=None):
     """Monta a mensagem completa do Slack.
+
+    ban_ip: se informado, adiciona um botao 'Banir IP' que bloqueia esse IP no
+    Sophos (o chamador so passa quando a integracao esta ligada e ha IP).
 
     Retorna (blocks, attachment_color, fallback_text).
     """
@@ -569,36 +607,38 @@ def render(alert, iris_alert_id, iris_url, wazuh_url, extra_context=None):
     if extra_context:
         blocks.append(context([extra_context]))
 
-    # Barra de acoes — apenas Assumir e Fechar. Os links (IRIS e Wazuh) ficam
-    # no titulo e na linha de contexto para nao poluir a mensagem.
+    # Barra de acoes. Os links (IRIS e Wazuh) ficam no titulo/contexto.
     val = json.dumps({"alert_id": iris_alert_id})
-    blocks.append(
+    elements = [
         {
-            "type": "actions",
-            "block_id": "alert_actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "ack_alert",
-                    "text": {"type": "plain_text", "text": "Assumir", "emoji": True},
-                    "style": "primary",
-                    "value": val,
-                },
-                {
-                    "type": "button",
-                    "action_id": "create_case",
-                    "text": {"type": "plain_text", "text": "Criar case", "emoji": True},
-                    "value": val,
-                },
-                {
-                    "type": "button",
-                    "action_id": "close_alert",
-                    "text": {"type": "plain_text", "text": "Fechar", "emoji": True},
-                    "value": val,
-                },
-            ],
-        }
-    )
+            "type": "button",
+            "action_id": "ack_alert",
+            "text": {"type": "plain_text", "text": "Assumir", "emoji": True},
+            "style": "primary",
+            "value": val,
+        },
+        {
+            "type": "button",
+            "action_id": "create_case",
+            "text": {"type": "plain_text", "text": "Criar case", "emoji": True},
+            "value": val,
+        },
+        {
+            "type": "button",
+            "action_id": "close_alert",
+            "text": {"type": "plain_text", "text": "Fechar", "emoji": True},
+            "value": val,
+        },
+    ]
+    if ban_ip:
+        elements.append({
+            "type": "button",
+            "action_id": "ban_ip",
+            "text": {"type": "plain_text", "text": "Banir IP", "emoji": True},
+            "style": "danger",
+            "value": json.dumps({"alert_id": iris_alert_id, "ip": ban_ip}),
+        })
+    blocks.append({"type": "actions", "block_id": "alert_actions", "elements": elements})
     blocks.append(
         context(
             [

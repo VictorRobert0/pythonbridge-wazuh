@@ -25,6 +25,7 @@ from config import settings
 from iris_client import IrisClient
 from store import Store
 from queue_worker import AlertQueue, run_worker
+from sophos_client import SophosClient, SophosError
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -53,6 +54,16 @@ iris = IrisClient(
 iris.base_public = IRIS_URL_PUBLIC
 store = Store(settings.DB_PATH)
 alert_queue = AlertQueue(settings.DB_PATH)
+
+sophos = None
+if settings.SOPHOS_ENABLED:
+    sophos = SophosClient(
+        settings.SOPHOS_URL, settings.SOPHOS_USER, settings.SOPHOS_PASS,
+        block_group=settings.SOPHOS_BLOCK_GROUP,
+        verify_ssl=settings.SOPHOS_VERIFY_TLS,
+    )
+    log.info("Sophos habilitado — botao 'Banir IP' ativo (grupo %s).",
+             settings.SOPHOS_BLOCK_GROUP)
 
 bolt = App(token=SLACK_BOT_TOKEN)
 flask_app = Flask(__name__)
@@ -187,6 +198,28 @@ def _authorized(req):
     return hmac.compare_digest(enviado, settings.INGEST_TOKEN)
 
 
+def _is_sophos_alert(ctx):
+    """True se o alerta veio do Sophos Firewall (decoder ou grupo da regra)."""
+    if str(ctx.decoder or "").lower().startswith("sophos"):
+        return True
+    grupos = (ctx.rule.get("groups") or [])
+    return any("sophos" in str(g).lower() for g in grupos)
+
+
+def _is_bannable_ip(ip):
+    """True se e um IP publico/roteavel que faz sentido banir."""
+    import ipaddress
+    if not ip or ip in ("-", "::1", "127.0.0.1"):
+        return False
+    try:
+        obj = ipaddress.ip_address(str(ip).strip())
+    except ValueError:
+        return False
+    # nao oferece banir loopback/link-local/multicast
+    return not (obj.is_loopback or obj.is_link_local or obj.is_multicast
+                or obj.is_unspecified)
+
+
 def process_alert(alert):
     """Cria o alerta no IRIS e posta no Slack. Chamado pelo worker da fila.
 
@@ -196,8 +229,17 @@ def process_alert(alert):
     payload, ctx = build_iris_payload(alert)
     alert_id, _ = iris.create_alert(payload)
 
+    # Botao "Banir IP": so em alertas ORIGINADOS DO SOPHOS (nao faz sentido
+    # oferecer bloqueio de firewall em alerta de AD/endpoint) e com a
+    # integracao configurada.
+    ban_ip = None
+    if sophos and _is_sophos_alert(ctx):
+        cand = ctx.d("srcip") or ctx.win("ipAddress")
+        if _is_bannable_ip(cand):
+            ban_ip = cand
+
     blocks, color, fallback = templates.render(
-        alert, alert_id, IRIS_URL_PUBLIC, WAZUH_DASHBOARD_URL
+        alert, alert_id, IRIS_URL_PUBLIC, WAZUH_DASHBOARD_URL, ban_ip=ban_ip
     )
     resp = bolt.client.chat_postMessage(
         channel=SLACK_CHANNEL,
@@ -331,6 +373,88 @@ def handle_ack(ack, body, client):
             slack_uid, who, "" if iris_user else " _(nao mapeado)_"
         ),
     )
+
+
+@bolt.action("ban_ip")
+def handle_ban_ip(ack, body, client):
+    """Abre a confirmacao antes de banir o IP no Sophos."""
+    ack()
+    val = json.loads(body["actions"][0]["value"])
+    alert_id, ip = val["alert_id"], val["ip"]
+    channel = body["channel"]["id"]
+    ts = body["message"]["ts"]
+
+    if not sophos:
+        client.chat_postEphemeral(channel=channel, user=body["user"]["id"],
+            thread_ts=ts, text=":warning: Integracao com o Sophos nao esta configurada.")
+        return
+
+    client.views_open(
+        trigger_id=body["trigger_id"],
+        view={
+            "type": "modal",
+            "callback_id": "ban_ip_modal",
+            "private_metadata": json.dumps(
+                {"alert_id": alert_id, "ip": ip, "channel": channel, "ts": ts}),
+            "title": {"type": "plain_text", "text": "Banir IP"},
+            "submit": {"type": "plain_text", "text": "Banir"},
+            "close": {"type": "plain_text", "text": "Cancelar"},
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn",
+                 "text": ":no_entry: Vai bloquear o IP *{}* no Sophos "
+                         "(grupo `{}`), a partir do alerta *#{}*.\n\n"
+                         "O trafego desse IP passa a ser *descartado* imediatamente."
+                         .format(ip, settings.SOPHOS_BLOCK_GROUP, alert_id)}},
+                {"type": "input", "block_id": "motivo", "optional": True,
+                 "label": {"type": "plain_text", "text": "Motivo (opcional)"},
+                 "element": {"type": "plain_text_input", "action_id": "value",
+                             "placeholder": {"type": "plain_text",
+                                             "text": "Por que esta banindo?"}}},
+            ],
+        },
+    )
+
+
+@bolt.view("ban_ip_modal")
+def handle_ban_ip_submit(ack, body, view, client):
+    ack()
+    meta = json.loads(view["private_metadata"])
+    alert_id, ip, channel, ts = meta["alert_id"], meta["ip"], meta["channel"], meta["ts"]
+    slack_uid = body["user"]["id"]
+    motivo = (view["state"]["values"].get("motivo", {}).get("value", {}) or {}).get("value") or ""
+
+    iris_user, info = resolve_iris_user(slack_uid)
+    autor = iris_user["name"] if iris_user else info["name"]
+
+    try:
+        res = sophos.block_ip(ip)
+    except SophosError as e:
+        log.exception("Falha ao banir %s no Sophos", ip)
+        client.chat_postMessage(channel=channel, thread_ts=ts,
+            text=":x: Nao consegui banir *{}* no Sophos: `{}`".format(ip, e))
+        return
+    except Exception as e:
+        log.exception("Erro inesperado ao banir %s", ip)
+        client.chat_postMessage(channel=channel, thread_ts=ts,
+            text=":x: Erro ao banir *{}*: `{}`".format(ip, e))
+        return
+
+    ja = res.get("already_blocked")
+    nota = "{} — IP {} {} no Sophos por {} (Slack).{}".format(
+        _stamp(), ip, "ja estava bloqueado" if ja else "BANIDO",
+        autor, " Motivo: " + motivo if motivo else "")
+    try:
+        iris.append_note(alert_id, nota)
+    except Exception:
+        log.exception("Nao consegui registrar o ban na nota do alerta %s", alert_id)
+
+    if ja:
+        txt = ":shield: <@{}>: *{}* ja estava bloqueado no Sophos.".format(slack_uid, ip)
+    else:
+        txt = ":no_entry: <@{}> baniu *{}* no Sophos (grupo `{}`).{}".format(
+            slack_uid, ip, res.get("group"),
+            "\n> " + motivo if motivo else "")
+    _append_context(channel, ts, txt)
 
 
 @bolt.action("create_case")

@@ -66,6 +66,15 @@ class Settings:
         self.WAZUH_INDEX_PATTERN = _read("WAZUH_INDEX_PATTERN", "wazuh-alerts-*")
         self.DC_AGENTS = _read("DC_AGENTS", "dc01-ad")
 
+        # ---- Sophos Firewall (banir IP) ----
+        self.SOPHOS_URL = _read("SOPHOS_URL", "")           # ex: https://172.16.16.16:4444
+        self.SOPHOS_USER = _read("SOPHOS_USER", "")
+        self.SOPHOS_PASS = _read("SOPHOS_PASS", secret=True)
+        self.SOPHOS_BLOCK_GROUP = _read("SOPHOS_BLOCK_GROUP", "SOC_Blocklist")
+        self.SOPHOS_VERIFY_TLS = _bool("SOPHOS_VERIFY_TLS", False)
+        # feature so liga se URL + credenciais existirem
+        self.SOPHOS_ENABLED = bool(self.SOPHOS_URL and self.SOPHOS_USER and self.SOPHOS_PASS)
+
         # ---- Seguranca da ingestao ----
         # Token compartilhado exigido no POST /wazuh (header X-Bridge-Token ou
         # ?token=). Vazio = sem autenticacao (apenas para lab isolado).

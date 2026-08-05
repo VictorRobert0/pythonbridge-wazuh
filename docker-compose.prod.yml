@@ -27,11 +27,13 @@ services:
       SLACK_APP_TOKEN_FILE: /run/secrets/slack_app_token
       IRIS_API_KEY_FILE: /run/secrets/iris_api_key
       INGEST_TOKEN_FILE: /run/secrets/ingest_token
+      SOPHOS_PASS_FILE: /run/secrets/sophos_pass
     secrets:
       - slack_bot_token
       - slack_app_token
       - iris_api_key
       - ingest_token
+      - sophos_pass
     volumes:
       - bridge-data:/data
       # monte aqui a CA do IRIS se usar IRIS_CA_BUNDLE=/certs/ca.pem
@@ -65,6 +67,8 @@ secrets:
     file: ./secrets/iris_api_key
   ingest_token:
     file: ./secrets/ingest_token
+  sophos_pass:
+    file: ./secrets/sophos_pass
 
 volumes:
   bridge-data:
